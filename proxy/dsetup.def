@@ -1,0 +1,5 @@
+; Exporta a DirectXSetupGetVersion com o mesmo ordinal (11) da dsetup.dll original da Microsoft,
+; que e o que o L2.exe importa. "@8" e a decoracao __stdcall (2 parametros de 4 bytes).
+LIBRARY dsetup
+EXPORTS
+    DirectXSetupGetVersion = DirectXSetupGetVersion@8 @11
