@@ -3,6 +3,7 @@
 // (LoadHtml, NCNPCHtmlViewer::OnPaint, NCScrollWnd::ShowScrollBar).
 // Titulo: leitura de <title color align>, ApplyTitleColor e o desvio da chamada que desenha o
 // texto do titulo (NCFrameCtrl, NWindow.dll+0x1BC40).
+// Fundo: leitura de <html background bgwidth bgheight> e desenho no NCNPCHtmlViewer::OnPaint.
 
 #include "html_resize.h"
 #include <stdlib.h>
@@ -23,6 +24,10 @@
 #define RVA_TITLE_DRAWCALL      0x1BC40   // NCFrameCtrl: "call DrawTextWithColor" do texto do titulo (E8 5B 5B 00 00)
 #define RVA_DRAWTEXTWITHCOLOR   0x217A0   // canvas DrawTextWithColor
 #define RVA_GETTEXTSIZE         0x20BB0   // medida de texto (largura, altura)
+#define RVA_GETTEXTURE          0x3F630   // busca de textura pelo nome ("Pacote.Textura")
+
+#define TEX_USIZE_OFFSET        0x580     // UTexture: largura (USize)
+#define TEX_VSIZE_OFFSET        0x584     // UTexture: altura (VSize)
 
 #define TITLE_DEFAULT_COLOR     0xFFC8D2DC
 
@@ -33,6 +38,9 @@ typedef void (__thiscall* fnSetClipRect)(void* canvas, int x, int y, int w, int 
 typedef void (__thiscall* fnPopOrigin)(void* canvas);
 typedef void (__thiscall* fnShowScrollBar)(void* window, int bShow);
 typedef void (__cdecl* fnGetTextSize)(int* outSize, const wchar_t* text, int p3, int p4, int p5, int p6, int p7, int p8);
+typedef void* (__thiscall* fnGetTexture)(void* thisPtr, const wchar_t* name, int bLogError);
+
+#define BG_NAME_MAX 128
 
 typedef struct HtmlPageMeta {
     int customWidth;
@@ -41,6 +49,9 @@ typedef struct HtmlPageMeta {
     int hasTitleColor;
     unsigned int titleColor;
     int titleAlign;             // 0 = padrao (centralizado se customWidth > 0), 1 = esquerda, 2 = centro, 3 = direita
+    wchar_t background[BG_NAME_MAX];   // textura de fundo ("Pacote.Textura"), vazio = fundo padrao
+    int bgWidth;                // area da imagem dentro da textura, a partir do canto (0,0);
+    int bgHeight;               // 0 = textura inteira
 } HtmlPageMeta;
 
 typedef struct ControlEntry {
@@ -58,6 +69,7 @@ static fnSetClipRect g_pfnSetClipRect = NULL;
 static fnPopOrigin g_pfnPopOrigin = NULL;
 static fnShowScrollBar g_pfnShowScrollBar = NULL;
 static fnGetTextSize g_pfnGetTextSize = NULL;
+static fnGetTexture g_pfnGetTexture = NULL;
 void* g_pfnDrawTextWithColor __asm__("html_resize_drawtext") = NULL;
 
 static int (__thiscall* Original_LoadHtml)(void* thisPtr, const wchar_t* html) = NULL;
@@ -74,6 +86,10 @@ static unsigned int g_customTitleColor = TITLE_DEFAULT_COLOR;
 // LoadHtml/ShowScrollBar e nao podem mexer no estado da pagina do NPC.
 static void* s_npcHtmlViewer = NULL;
 static void* s_npcTitleCtrl = NULL;
+
+// ultima textura de fundo buscada (tambem guarda a falha, para nao buscar de novo a cada quadro)
+static wchar_t s_bgTexName[BG_NAME_MAX];
+static void* s_bgTex = NULL;
 
 static int IsValidPointer(void* ptr) {
     if (!ptr) return 0;
@@ -159,7 +175,7 @@ static void ParseHtmlPage(const wchar_t* html) {
     if (!html) return;
 
     const wchar_t* p = html;
-    wchar_t tempBuf[64];
+    wchar_t tempBuf[BG_NAME_MAX];
 
     while (*p) {
         if (*p == L'<') {
@@ -179,6 +195,15 @@ static void ParseHtmlPage(const wchar_t* html) {
                 if (ExtractAttrValue(tagStart, tagEnd, L"noscroll", tempBuf, 64) ||
                     ExtractAttrValue(tagStart, tagEnd, L"noscrollbar", tempBuf, 64)) {
                     s_currentPage.noScroll = 1;
+                }
+                if (ExtractAttrValue(tagStart, tagEnd, L"background", tempBuf, BG_NAME_MAX)) {
+                    wcsncpy(s_currentPage.background, tempBuf, BG_NAME_MAX - 1);
+                }
+                if (ExtractAttrValue(tagStart, tagEnd, L"bgwidth", tempBuf, 64)) {
+                    s_currentPage.bgWidth = _wtoi(tempBuf);
+                }
+                if (ExtractAttrValue(tagStart, tagEnd, L"bgheight", tempBuf, 64)) {
+                    s_currentPage.bgHeight = _wtoi(tempBuf);
                 }
             }
             else if (_wcsnicmp(tagStart, L"title", 5) == 0 && (tagStart[5] == L' ' || tagStart[5] == L'\t' || tagStart[5] == L'>')) {
@@ -492,6 +517,42 @@ static void Draw9SliceBackground(void* canvas, void* tex, int winW, int winH) {
     g_pfnDrawTexture(canvas, winW - cR, winH - cB, cR, cB, srcW - cR, srcH - cB, cR, cB, tex, 255, 1);       // canto inf. dir.
 }
 
+// ---- fundo da pagina (<html background=...>) ----
+
+static void* GetPageBackgroundTexture(void) {
+    if (!s_currentPage.background[0] || !g_pfnGetTexture) return NULL;
+    if (_wcsicmp(s_bgTexName, s_currentPage.background) != 0) {
+        wcsncpy(s_bgTexName, s_currentPage.background, BG_NAME_MAX - 1);
+        s_bgTexName[BG_NAME_MAX - 1] = L'\0';
+        s_bgTex = g_pfnGetTexture(NULL, s_bgTexName, 0);
+    }
+    return s_bgTex;
+}
+
+// O fundo ocupa a area de conteudo do HTML (X+7, Y+30): ficam visiveis 7 px de moldura nas laterais
+// e embaixo e, em cima, a barra de titulo (20 px) com a faixa de 10 px abaixo dela.
+#define BG_FRAME_SIDE   7
+#define BG_TOP          30
+
+// Desenha a area (0,0)-(bgwidth,bgheight) da textura em tamanho real (sem esticar), no canto
+// superior esquerdo da area dentro da moldura; o que passar dessa area e cortado.
+// Sem bgwidth/bgheight usa a textura inteira (USize x VSize).
+static void DrawPageBackground(void* canvas, void* tex, int winW, int winH) {
+    if (!canvas || !tex || !g_pfnDrawTexture) return;
+    int texW = *(int*)((char*)tex + TEX_USIZE_OFFSET);
+    int texH = *(int*)((char*)tex + TEX_VSIZE_OFFSET);
+    if (texW <= 0) texW = 256;
+    if (texH <= 0) texH = 256;
+    int w = s_currentPage.bgWidth > 0 ? s_currentPage.bgWidth : texW;
+    int h = s_currentPage.bgHeight > 0 ? s_currentPage.bgHeight : texH;
+    int areaW = winW - 2 * BG_FRAME_SIDE;
+    int areaH = winH - BG_TOP - BG_FRAME_SIDE;
+    if (w > areaW) w = areaW;
+    if (h > areaH) h = areaH;
+    if (w <= 0 || h <= 0) return;
+    g_pfnDrawTexture(canvas, BG_FRAME_SIDE, BG_TOP, w, h, 0, 0, w, h, tex, 255, 1);
+}
+
 // ---- hooks ----
 
 // NCHtmlViewer::LoadHtml: le tamanho e titulo e aplica antes e depois (o UpdateScrollBar interno desfaria)
@@ -521,15 +582,25 @@ static void __fastcall Hooked_NCNPCHtmlViewer_OnPaint(void* thisPtr, void* edx, 
     (void)edx;
     if (!thisPtr || !canvas) return;
 
-    if (s_currentPage.customWidth <= 0 || s_currentPage.customHeight <= 0) {
-        Original_NCNPCHtmlViewer_OnPaint(thisPtr, canvas);
-        return;
-    }
-
     int winX = *(int*)((char*)thisPtr + 0x80);
     int winY = *(int*)((char*)thisPtr + 0x84);
     int winW = (int)*(float*)((char*)thisPtr + 0x88);
     int winH = (int)*(float*)((char*)thisPtr + 0x8C);
+    void* bgTex = GetPageBackgroundTexture();
+
+    if (s_currentPage.customWidth <= 0 || s_currentPage.customHeight <= 0) {
+        Original_NCNPCHtmlViewer_OnPaint(thisPtr, canvas);
+        if (bgTex) {
+            // tamanho padrao com fundo proprio: desenha dentro da moldura original
+            if (g_pfnPushOrigin) g_pfnPushOrigin(canvas, winX, winY);
+            if (g_pfnSetClipRect) g_pfnSetClipRect(canvas, winX, winY, winW, winH);
+            DrawPageBackground(canvas, bgTex, winW, winH);
+            *(int*)((char*)canvas + 0x38) = 0;
+            *(int*)((char*)canvas + 0x3C) = 0;
+            if (g_pfnPopOrigin) g_pfnPopOrigin(canvas);
+        }
+        return;
+    }
 
     void* titleCtrl = *(void**)((char*)thisPtr + 0xC0);
     if (titleCtrl && IsValidPointer(titleCtrl)) {
@@ -559,6 +630,7 @@ static void __fastcall Hooked_NCNPCHtmlViewer_OnPaint(void* thisPtr, void* edx, 
 
     void* defaultTex = *(void**)((char*)thisPtr + 0x1D0);   // NPCHtml_BACK
     if (defaultTex) Draw9SliceBackground(canvas, defaultTex, winW, winH);
+    if (bgTex) DrawPageBackground(canvas, bgTex, winW, winH);   // dentro da moldura
 
     *(int*)((char*)canvas + 0x38) = 0;
     *(int*)((char*)canvas + 0x3C) = 0;
@@ -585,6 +657,7 @@ int HtmlResize_Init(uintptr_t base) {
     g_pfnShowScrollBar = (fnShowScrollBar)(base + RVA_SHOWSCROLLBAR);
     g_pfnGetTextSize = (fnGetTextSize)(base + RVA_GETTEXTSIZE);
     g_pfnDrawTextWithColor = (void*)(base + RVA_DRAWTEXTWITHCOLOR);
+    g_pfnGetTexture = (fnGetTexture)(base + RVA_GETTEXTURE);
 
     PatchTitleCall(base, 1);          // cor/alinhamento do titulo (ignorado se o NWindow.dll for outro)
 

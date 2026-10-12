@@ -1,7 +1,8 @@
 # CustomWndSchuster
 
 DLL para o cliente **Lineage II Interlude** que permite ao servidor definir, pelo próprio HTML,
-o **tamanho** da janela de diálogo de NPC e a **cor** e o **alinhamento** do título dela.
+o **tamanho** e o **fundo** da janela de diálogo de NPC e a **cor** e o **alinhamento** do título
+dela.
 
 ```html
 <html width=500 height=420 noscroll>
@@ -156,6 +157,9 @@ Os atributos são escritos nas tags `<html>` e `<title>` da página enviada pelo
 | `<html>` | `width` | número (px) | largura total da janela. Padrão do cliente: **310** |
 | `<html>` | `height` | número (px) | altura total da janela, incluindo a barra de título. Padrão do cliente: **401** |
 | `<html>` | `noscroll` | sem valor | esconde a barra de rolagem e devolve os 16 px dela para o conteúdo. `noscrollbar` também funciona |
+| `<html>` | `background` | `Pacote.Textura` | textura de fundo da janela, no lugar do `NPCHtml_BACK` (veja [4.3](#43-fundo-personalizado)) |
+| `<html>` | `bgwidth` | número (px) | largura da imagem dentro da textura. Padrão: largura da textura |
+| `<html>` | `bgheight` | número (px) | altura da imagem dentro da textura. Padrão: altura da textura |
 | `<title>` | `color` | `#RRGGBB`, `0xRRGGBB`, `RRGGBB` ou um nome (abaixo) | cor do texto do título |
 | `<title>` | `align` | `left`, `center`, `right` | posição do texto do título |
 
@@ -207,7 +211,34 @@ tamanho, e as bordas e o centro esticam. Por isso, a moldura não deforma em nen
 título, o botão de fechar e a barra de rolagem acompanham a janela, inclusive quando ela é
 arrastada.
 
-### 4.3 Exemplos
+### 4.3 Fundo personalizado
+
+`background` troca o fundo da janela por uma textura de uma `.utx` do cliente (por exemplo,
+`background=MeuPacote.FundoLoja`). A moldura padrão da janela continua visível. A imagem é
+desenhada em **tamanho real**, sem esticar, no canto superior esquerdo da área de conteúdo.
+Essa é a mesma área do conteúdo HTML: começa 30 px abaixo do topo (barra de título de 20 px e a
+faixa de 10 px abaixo dela continuam visíveis), deixa 7 px de moldura nas laterais e embaixo e
+mede `width - 14` x `height - 37` px. O que passar dela é cortado. Se a imagem for
+menor, o resto da área mostra o fundo padrão.
+
+Texturas de Unreal costumam ter lados em potência de 2 (256, 512, 1024...). Para uma imagem que
+não tem esse tamanho, salve-a no canto superior esquerdo de uma textura maior e informe o tamanho
+real da imagem com `bgwidth` e `bgheight`. Só essa área é usada, e o resto da textura é ignorado.
+
+| Imagem | Textura na `.utx` | Atributos |
+|---|---|---|
+| 512 x 512 | 512 x 512 | `background=Pct.Fundo` |
+| 450 x 463 | 512 x 512 | `background=Pct.Fundo bgwidth=450 bgheight=463` |
+
+Para a imagem preencher a área inteira, faça-a com `width - 14` x `height - 37` px. Exemplo: para
+`<html width=464 height=500>`, uma imagem de 450 x 463.
+
+Regras:
+- Funciona com tamanho personalizado ou padrão. No tamanho padrão (310 x 401), a área de conteúdo
+  é de 296 x 364.
+- Se a textura não for encontrada (pacote ou nome errado), a janela usa o fundo padrão.
+
+### 4.4 Exemplos
 
 Janela larga, sem rolagem, título dourado centralizado:
 
@@ -227,6 +258,15 @@ Tamanho padrão, só com o título colorido à esquerda:
 ```html
 <html>
 <title color="#00FFFF" align=left>Teleporte</title>
+<body>...</body>
+</html>
+```
+
+Fundo próprio: imagem de 450 x 463 salva numa textura de 512 x 512:
+
+```html
+<html width=464 height=500 noscroll background=MeuPacote.FundoLoja bgwidth=450 bgheight=463>
+<title color=LEVEL>Loja</title>
 <body>...</body>
 </html>
 ```
@@ -375,8 +415,11 @@ que desfaz os hooks.
 
 ### 8.2 Fluxo ao abrir uma página
 
-1. **`NCHtmlViewer::LoadHtml`** (hook): antes de o cliente montar a página, `ParseHtmlPage` lê
-   `width`, `height`, `noscroll`, `color` e `align`.
+1. **`NCHtmlViewer::LoadHtml`** (hook): só age quando o viewer pertence à janela de NPC. Outras
+   janelas HTML que usam o mesmo `NCHtmlViewer`, como o Community Board (Alt+B), passam direto
+   para o original e não alteram o estado da página do NPC. Antes de o cliente montar a página,
+   `ParseHtmlPage` lê `width`, `height`, `noscroll`, `background`, `bgwidth`, `bgheight`, `color`
+   e `align`.
    - `ApplyWindowSize` redimensiona a janela de NPC (`NCNPCHtmlViewer`), a barra de título, o
      botão de fechar, a área de conteúdo e a barra de rolagem.
    - `ApplyTitleColor` registra a cor do título.
@@ -384,17 +427,20 @@ que desfaz os hooks.
      rolagem e desfaria o ajuste.
    - Uma página sem os atributos restaura o padrão: 310 x 401, conteúdo de 296 x 364 e barra
      visível.
-2. **`NCNPCHtmlViewer::OnPaint`** (hook), só com tamanho personalizado: mantém o título, o
+2. **`NCNPCHtmlViewer::OnPaint`** (hook), com tamanho personalizado: mantém o título, o
    botão de fechar e a barra de rolagem na posição certa (a janela pode ter sido arrastada) e
-   desenha o fundo `NPCHtml_BACK` esticado em 9 partes (`Draw9SliceBackground`). Com o tamanho
-   padrão, o desenho original é usado.
+   desenha o fundo `NPCHtml_BACK` esticado em 9 partes (`Draw9SliceBackground`) e, se houver,
+   a textura de `background` dentro da moldura (`DrawPageBackground`). Com o tamanho padrão, o
+   desenho original é usado, e a textura de `background` é desenhada dentro da moldura. A textura é
+   buscada pelo nome (`GetTexture`) só quando o nome muda, e não a cada quadro.
 3. **Texto do título** (desvio em `NWindow.dll+0x1BC40`): o `NCFrameCtrl` desenha o título com
    `DrawTextWithColor`. A instrução `call` foi trocada por `Hook_DrawFrameTitleText`, que chama
    `AdjustFrameTitle(frame, &x, &cor, texto)`. Essa função troca a cor (só no título da janela de
    NPC), mede o texto e calcula o `x` para centralizar ou alinhar à direita. Depois, segue para o
    `DrawTextWithColor` original.
-4. **`NCScrollWnd::ShowScrollBar`** (hook): com `noscroll`, sempre esconde a barra, porque o
-   cliente tenta mostrá-la de novo em vários momentos.
+4. **`NCScrollWnd::ShowScrollBar`** (hook): com `noscroll`, sempre esconde a barra da janela de
+   NPC, porque o cliente tenta mostrá-la de novo em vários momentos. A barra das outras janelas
+   não é afetada.
 
 ### 8.3 Endereços usados (RVAs no `NWindow.dll`)
 
@@ -414,6 +460,7 @@ Definidos no início de [src/html_resize.c](src/html_resize.c):
 | `RVA_TITLE_DRAWCALL` | `0x1BC40` | `call DrawTextWithColor` do título no `NCFrameCtrl` |
 | `RVA_DRAWTEXTWITHCOLOR` | `0x217A0` | canvas `DrawTextWithColor` |
 | `RVA_GETTEXTSIZE` | `0x20BB0` | medida de texto (largura, altura) |
+| `RVA_GETTEXTURE` | `0x3F630` | busca de textura pelo nome (`Pacote.Textura`) |
 
 O código também usa offsets de campos dos objetos do `NWindow.dll`, por exemplo `+0x80/+0x84`
 (posição X/Y), `+0x88/+0x8C` (largura/altura), `+0xC0` (barra de título) e `+0x1E0..+0x204`
