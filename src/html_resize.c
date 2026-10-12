@@ -70,6 +70,11 @@ static int s_bWasTitleColored = 0;
 static void* g_pColoredFrameCtrl = NULL;
 static unsigned int g_customTitleColor = TITLE_DEFAULT_COLOR;
 
+// NCHtmlViewer e titulo da janela de NPC. Outros viewers (Community Board etc.) passam pelos mesmos
+// LoadHtml/ShowScrollBar e nao podem mexer no estado da pagina do NPC.
+static void* s_npcHtmlViewer = NULL;
+static void* s_npcTitleCtrl = NULL;
+
 static int IsValidPointer(void* ptr) {
     if (!ptr) return 0;
     uintptr_t val = (uintptr_t)ptr;
@@ -396,7 +401,7 @@ void AdjustFrameTitle(void* frameCtrl, int* pX, unsigned int* pColor, const wcha
         *pColor = g_customTitleColor;
     }
 
-    if (pX && text && text[0] && g_pfnGetTextSize) {
+    if (frameCtrl == s_npcTitleCtrl && pX && text && text[0] && g_pfnGetTextSize) {
         int shouldCenter = (s_currentPage.titleAlign == 2) || (s_currentPage.titleAlign == 0 && s_currentPage.customWidth > 0);
         int shouldRight = (s_currentPage.titleAlign == 3);
 
@@ -492,6 +497,15 @@ static void Draw9SliceBackground(void* canvas, void* tex, int winW, int winH) {
 // NCHtmlViewer::LoadHtml: le tamanho e titulo e aplica antes e depois (o UpdateScrollBar interno desfaria)
 static int __fastcall Hooked_LoadHtml(void* thisPtr, void* edx, const wchar_t* html) {
     (void)edx;
+    void* npcViewer = NULL;
+    FindNpcControls(thisPtr, &npcViewer);
+    if (!npcViewer || !IsValidPointer(npcViewer)) {
+        return Original_LoadHtml(thisPtr, html);   // nao e a janela de NPC: nao toca em nada
+    }
+    s_npcHtmlViewer = thisPtr;
+    void* titleCtrl = *(void**)((char*)npcViewer + 0xC0);
+    s_npcTitleCtrl = IsValidPointer(titleCtrl) ? titleCtrl : NULL;
+
     ParseHtmlPage(html);
     ApplyWindowSize(thisPtr, s_currentPage.customWidth, s_currentPage.customHeight, s_currentPage.noScroll);
     ApplyTitleColor(thisPtr, s_currentPage.hasTitleColor, s_currentPage.titleColor);
@@ -554,7 +568,7 @@ static void __fastcall Hooked_NCNPCHtmlViewer_OnPaint(void* thisPtr, void* edx, 
 // NCScrollWnd::ShowScrollBar: com noscroll a barra nunca volta
 static void __fastcall Hooked_ShowScrollBar(void* thisPtr, void* edx, int bShow) {
     (void)edx;
-    Original_ShowScrollBar(thisPtr, s_currentPage.noScroll ? 0 : bShow);
+    Original_ShowScrollBar(thisPtr, (s_currentPage.noScroll && thisPtr == s_npcHtmlViewer) ? 0 : bShow);
 }
 
 // ---- instalacao ----
